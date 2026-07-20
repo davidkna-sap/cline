@@ -877,6 +877,7 @@ export async function buildSessionConfig(input: SessionConfigInput): Promise<Cor
 		...(baseUrl !== undefined ? { baseUrl } : {}),
 		...(knownModels && Object.keys(knownModels).length > 0 ? { knownModels } : {}),
 		fetch,
+		logger: sdkLogger,
 	}
 
 	const config: CoreSessionConfig = {

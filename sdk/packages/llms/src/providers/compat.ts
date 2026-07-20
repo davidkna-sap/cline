@@ -1,5 +1,6 @@
 import type {
 	AgentModelEvent,
+	BasicLogger,
 	GatewayModelDefinition,
 	GatewayProviderFactory,
 	GatewayProviderRegistration,
@@ -519,6 +520,9 @@ function buildGatewayModels(
 
 function buildGatewayConfig(config: ProviderConfig) {
 	const providerId = normalizeProviderId(config.providerId);
+	const debugLogger = (config.logger ?? config.extensionContext?.logger) as
+		| BasicLogger
+		| undefined;
 	return {
 		providerId,
 		apiKey: config.apiKey ?? config.accessToken,
@@ -529,6 +533,7 @@ function buildGatewayConfig(config: ProviderConfig) {
 		defaultModelId: config.modelId,
 		models: buildGatewayModels(providerId, config),
 		options: {
+			__clineLogger: debugLogger,
 			region: config.region ?? config.gcp?.region,
 			project: config.gcp?.projectId,
 			projectId: config.gcp?.projectId,

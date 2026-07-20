@@ -14,6 +14,7 @@
 		"src/index.browser.ts",
 		"src/models.ts",
 		"src/providers.ts",
-		"src/providers.browser.ts"
+		"src/providers.browser.ts",
+		"src/types/sap-xssec.d.ts"
 	]
 }
