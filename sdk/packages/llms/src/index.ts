@@ -99,4 +99,11 @@ export {
 	type ResolveProviderRequestHeadersInput,
 	resolveProviderRequestHeaders,
 } from "./providers/request-headers";
+export {
+	createSapAiCoreTokenGetter,
+	fetchSapAiCoreToken,
+	type SapAiCoreToken,
+	type SapAiCoreTokenCredentials,
+	type SapAiCoreTokenRequestOptions,
+} from "./providers/sap-auth";
 export { disposeLangfuseTelemetry } from "./services/langfuse-telemetry";

@@ -6,18 +6,22 @@ import type { GatewayResolvedProviderConfig } from "@cline/shared";
 // provider. Hiding it behind a computed dynamic import leaves the published
 // extension trying to load @jerome-benoit/sap-ai-provider from node_modules at
 // runtime, but VSIX packaging uses the bundled extension output.
-import { createSAPAIProvider } from "@jerome-benoit/sap-ai-provider";
+import {
+	createSAPAIProvider,
+	type SAPAIProviderSettings,
+} from "@jerome-benoit/sap-ai-provider";
 import { createDifyProvider } from "dify-ai-provider";
 import { resolveApiKey } from "../http";
+import {
+	createSapAiCoreTokenGetter,
+	type SapAiCoreTokenCredentials,
+} from "../sap-auth";
 import type { ProviderFactoryResult } from "./types";
 
-type SapModel = Record<PropertyKey, unknown>;
-const SAP_SERVICE_KEY_METHODS = new Set<PropertyKey>([
-	"doGenerate",
-	"doStream",
-	"doEmbed",
-]);
-let sapServiceKeyQueue: Promise<void> = Promise.resolve();
+type SapDestination = NonNullable<SAPAIProviderSettings["destination"]>;
+type SapRequestMiddleware = NonNullable<
+	NonNullable<SAPAIProviderSettings["requestConfig"]>["middleware"]
+>[number];
 
 function readOptions(
 	config: GatewayResolvedProviderConfig,
@@ -61,10 +65,7 @@ function resolveClaudeExecutable(): string | undefined {
 	const executableName = process.platform === "win32" ? "claude.exe" : "claude";
 	// Anchor on the real executable location first so resolution works from
 	// compiled binaries; fall back to this module's location for plain node.
-	const anchors = [
-		join(dirname(process.execPath), "noop.js"),
-		import.meta.url,
-	];
+	const anchors = [join(dirname(process.execPath), "noop.js"), import.meta.url];
 	for (const anchor of anchors) {
 		for (const suffix of suffixes) {
 			try {
@@ -218,11 +219,6 @@ function readStringOption(
 		: undefined;
 }
 
-function normalizeSapTokenBaseUrl(tokenUrl: string): string {
-	const trimmed = tokenUrl.replace(/\/+$/, "");
-	return trimmed.replace(/\/oauth\/token$/i, "");
-}
-
 function hasExplicitSapConnectionConfig(
 	config: GatewayResolvedProviderConfig,
 	options: Record<string, unknown>,
@@ -236,39 +232,56 @@ function hasExplicitSapConnectionConfig(
 	);
 }
 
-function buildSapServiceKey(
+interface SapConnection extends SapAiCoreTokenCredentials {
+	baseUrl: string;
+}
+
+function resolveSapConnection(
 	config: GatewayResolvedProviderConfig,
 	options: Record<string, unknown>,
-): string | undefined {
+): SapConnection | undefined {
 	const clientId = readStringOption(options, "clientId");
 	const clientSecret =
 		readStringOption(options, "clientSecret") ?? config.apiKey?.trim();
 	const tokenUrl = readStringOption(options, "tokenUrl");
 	const baseUrl = config.baseUrl?.trim();
-	if (!clientId || !clientSecret || !tokenUrl || !baseUrl) {
-		if (!hasExplicitSapConnectionConfig(config, options)) {
-			return undefined;
-		}
-		const missing = [
-			!clientId ? "sap.clientId" : undefined,
-			!clientSecret ? "sap.clientSecret" : undefined,
-			!tokenUrl ? "sap.tokenUrl" : undefined,
-			!baseUrl ? "baseUrl" : undefined,
-		].filter(Boolean);
-		throw new Error(
-			`SAP AI Core provider is missing required configuration: ${missing.join(
-				", ",
-			)}.`,
-		);
+
+	if (clientId && clientSecret && tokenUrl && baseUrl) {
+		return { clientId, clientSecret, tokenUrl, baseUrl };
 	}
-	return JSON.stringify({
-		clientid: clientId,
-		clientsecret: clientSecret,
-		serviceurls: {
-			AI_API_URL: baseUrl.replace(/\/+$/, ""),
-		},
-		url: normalizeSapTokenBaseUrl(tokenUrl),
-	});
+	if (!hasExplicitSapConnectionConfig(config, options)) {
+		return undefined;
+	}
+	const missing = [
+		!clientId ? "sap.clientId" : undefined,
+		!clientSecret ? "sap.clientSecret" : undefined,
+		!tokenUrl ? "sap.tokenUrl" : undefined,
+		!baseUrl ? "baseUrl" : undefined,
+	].filter(Boolean);
+	throw new Error(
+		`SAP AI Core provider is missing required configuration: ${missing.join(", ")}.`,
+	);
+}
+
+function createSapDestination(connection: SapConnection): SapDestination {
+	return {
+		url: connection.baseUrl.replace(/\/+$/, ""),
+		authentication: "NoAuthentication",
+	};
+}
+
+function createSapAuthMiddleware(
+	getToken: () => Promise<string>,
+): SapRequestMiddleware {
+	return ({ fn }) =>
+		async (request) =>
+			fn({
+				...request,
+				headers: {
+					...request.headers,
+					Authorization: `Bearer ${await getToken()}`,
+				},
+			});
 }
 
 function resolveSapApi(options: Record<string, unknown>) {
@@ -282,72 +295,18 @@ function resolveSapApi(options: Record<string, unknown>) {
 	return "orchestration";
 }
 
-async function withSapServiceKey<T>(
-	serviceKey: string | undefined,
-	fn: () => T,
-): Promise<Awaited<T>> {
-	if (!serviceKey) {
-		return await fn();
-	}
-
-	const previousQueue = sapServiceKeyQueue.catch(() => {});
-	let releaseQueue!: () => void;
-	sapServiceKeyQueue = new Promise<void>((resolve) => {
-		releaseQueue = resolve;
-	});
-
-	await previousQueue;
-	const previous = process.env.AICORE_SERVICE_KEY;
-	process.env.AICORE_SERVICE_KEY = serviceKey;
-	try {
-		return await fn();
-	} catch (error) {
-		throw error;
-	} finally {
-		restoreSapServiceKey(previous);
-		releaseQueue();
-	}
-}
-
-function shouldWrapSapServiceKeyMethod(property: PropertyKey): boolean {
-	return SAP_SERVICE_KEY_METHODS.has(property);
-}
-
-function restoreSapServiceKey(previous: string | undefined): void {
-	if (previous === undefined) {
-		delete process.env.AICORE_SERVICE_KEY;
-		return;
-	}
-	process.env.AICORE_SERVICE_KEY = previous;
-}
-
-function wrapSapModelWithServiceKey(
-	model: unknown,
-	serviceKey: string | undefined,
-): unknown {
-	if (!serviceKey || !model || typeof model !== "object") {
-		return model;
-	}
-	return new Proxy(model as SapModel, {
-		get(target, property, receiver) {
-			const value = Reflect.get(target, property, receiver);
-			if (
-				typeof value !== "function" ||
-				!shouldWrapSapServiceKeyMethod(property)
-			) {
-				return value;
-			}
-			return (...args: unknown[]) =>
-				withSapServiceKey(serviceKey, () => value.apply(target, args));
-		},
-	});
-}
-
 export async function createSapAiCoreProviderModule(
 	config: GatewayResolvedProviderConfig,
 ): Promise<ProviderFactoryResult> {
 	const options = readOptions(config);
-	const serviceKey = buildSapServiceKey(config, options);
+	const connection = resolveSapConnection(config, options);
+	const getToken = connection
+		? createSapAiCoreTokenGetter(connection, {
+				fetch: config.fetch,
+				timeoutMs: config.timeoutMs,
+			})
+		: undefined;
+	const destination = connection ? createSapDestination(connection) : undefined;
 
 	const deploymentId = readStringOption(options, "deploymentId");
 	const provider = createSAPAIProvider({
@@ -356,6 +315,7 @@ export async function createSapAiCoreProviderModule(
 			? { deploymentId }
 			: { resourceGroup: readStringOption(options, "resourceGroup") }),
 		api: resolveSapApi(options),
+		...(destination ? { destination } : {}),
 		...(typeof options.defaultSettings === "object" &&
 		options.defaultSettings !== null &&
 		!Array.isArray(options.defaultSettings)
@@ -366,12 +326,13 @@ export async function createSapAiCoreProviderModule(
 			// Standard cline axios settings mirroring `getAxiosSettings()`
 			adapter: "fetch",
 			...(config.fetch ? { fetch: config.fetch } : {}),
+			...(getToken ? { middleware: [createSapAuthMiddleware(getToken)] } : {}),
 			maxBodyLength: Number.POSITIVE_INFINITY,
 			maxContentLength: Number.POSITIVE_INFINITY,
 		},
 	});
+
 	return {
-		model: (modelId) =>
-			wrapSapModelWithServiceKey(provider(modelId), serviceKey),
+		model: (modelId) => provider(modelId),
 	};
 }

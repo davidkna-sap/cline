@@ -517,7 +517,10 @@ describe("createAgentModelFromConfig", () => {
 			};
 		};
 
-		expect(model.config?.destination).toBeUndefined();
+		expect(model.config?.destination).toMatchObject({
+			url: "https://api.ai.example.aws.ml.hana.ondemand.com",
+			authentication: "NoAuthentication",
+		});
 		expect(model.config?.deploymentConfig).toMatchObject({
 			deploymentId: "deployment-id",
 		});

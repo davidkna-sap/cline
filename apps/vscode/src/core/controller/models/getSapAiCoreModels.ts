@@ -1,45 +1,13 @@
+import { fetchSapAiCoreToken } from "@cline/llms"
 import axios from "axios"
-import { getAxiosSettings } from "@/shared/net"
+import { fetch, getAxiosSettings } from "@/shared/net"
 import { SapAiCoreModelDeployment, SapAiCoreModelsRequest, SapAiCoreModelsResponse } from "@/shared/proto/cline/models"
 import { Logger } from "@/shared/services/Logger"
 import { Controller } from ".."
 
-interface Token {
-	access_token: string
-	expires_in: number
-	scope: string
-	jti: string
-	token_type: string
-	expires_at: number
-}
-
 interface Deployment {
 	id: string
 	name: string
-}
-
-/**
- * Authenticates with SAP AI Core and returns an access token
- * @param clientId SAP AI Core client ID
- * @param clientSecret SAP AI Core client secret
- * @param tokenUrl SAP AI Core token URL
- * @returns Promise<Token> Access token with metadata
- */
-async function getToken(clientId: string, clientSecret: string, tokenUrl: string): Promise<Token> {
-	const payload = new URLSearchParams({
-		grant_type: "client_credentials",
-		client_id: clientId,
-		client_secret: clientSecret,
-	})
-
-	const url = tokenUrl.replace(/\/+$/, "") + "/oauth/token"
-	const response = await axios.post(url, payload, {
-		headers: { "Content-Type": "application/x-www-form-urlencoded" },
-		...getAxiosSettings(),
-	})
-	const token = response.data as Token
-	token.expires_at = Date.now() + token.expires_in * 1000
-	return token
 }
 
 /**
@@ -110,7 +78,7 @@ export async function getSapAiCoreModels(
 ): Promise<SapAiCoreModelsResponse> {
 	try {
 		// Check if required configuration is provided
-		if (!request.clientId || !request.clientSecret || !request.baseUrl) {
+		if (!request.clientId || !request.clientSecret || !request.tokenUrl || !request.baseUrl) {
 			// Return empty response if configuration is incomplete
 			return SapAiCoreModelsResponse.create({
 				deployments: [],
@@ -118,10 +86,16 @@ export async function getSapAiCoreModels(
 			})
 		}
 
-		// Direct authentication and deployment/orchestration fetching
-		const token = await getToken(request.clientId, request.clientSecret, request.tokenUrl)
+		const token = await fetchSapAiCoreToken(
+			{
+				clientId: request.clientId,
+				clientSecret: request.clientSecret,
+				tokenUrl: request.tokenUrl,
+			},
+			{ fetch },
+		)
 		const { deployments, orchestrationAvailable } = await fetchAiCoreDeploymentsAndOrchestration(
-			token.access_token,
+			token.value,
 			request.baseUrl,
 			request.resourceGroup,
 		)
