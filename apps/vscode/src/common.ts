@@ -1,6 +1,3 @@
-import { WebviewProvider } from "./core/webview"
-import "./utils/path" // necessary to have access to String.prototype.toPosix
-
 import { setSdkLogger } from "@cline/core"
 import { HostProvider } from "@/hosts/host-provider"
 import { Logger } from "@/shared/services/Logger"
@@ -10,6 +7,7 @@ import { HookDiscoveryCache } from "./core/hooks/HookDiscoveryCache"
 import { HookProcessRegistry } from "./core/hooks/HookProcessRegistry"
 import { StateManager } from "./core/storage/StateManager"
 import { AgentConfigLoader } from "./core/task/tools/subagent/AgentConfigLoader"
+import { WebviewProvider } from "./core/webview"
 import { ExtensionRegistryInfo } from "./registry"
 import { registerVsCodeLmHandler } from "./sdk/vscode-lm/register-vscode-lm"
 import { ErrorService } from "./services/error"
@@ -22,7 +20,7 @@ import { ShowMessageType } from "./shared/proto/host/window"
 import { syncWorker } from "./shared/services/worker/sync"
 import { getBlobStoreSettingsFromEnv } from "./shared/services/worker/worker"
 import { getLatestAnnouncementId } from "./utils/announcements"
-import { arePathsEqual } from "./utils/path"
+import { arePathsEqual } from "./utils/path" // necessary to have access to String.prototype.toPosix
 
 /**
  * Performs intialization for Cline that is common to all platforms.

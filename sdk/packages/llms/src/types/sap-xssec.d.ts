@@ -24,6 +24,11 @@ declare module "@sap/xssec" {
 			url: string | URL,
 			init: Record<string, unknown>,
 		) => Promise<Response>;
+		requests?: {
+			agent?: unknown;
+			ca?: string | string[];
+			timeout?: number;
+		};
 	}
 
 	export interface TokenFetchResponse {

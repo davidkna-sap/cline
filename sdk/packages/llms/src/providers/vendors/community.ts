@@ -1,6 +1,7 @@
 import { accessSync, constants as fsConstants } from "node:fs";
 import { createRequire } from "node:module";
 import { delimiter, dirname, join } from "node:path";
+import tls from "node:tls";
 import type { BasicLogger, GatewayResolvedProviderConfig } from "@cline/shared";
 import type { HttpDestination } from "@sap-cloud-sdk/connectivity";
 import { XsuaaService } from "@sap/xssec";
@@ -12,7 +13,19 @@ import { createSAPAIProvider } from "@jerome-benoit/sap-ai-provider";
 import { createDifyProvider } from "dify-ai-provider";
 import { resolveApiKey } from "../http";
 import type { ProviderFactoryResult } from "./types";
+
 const CLINE_DEBUG_LOGGER_OPTION = "__clineLogger";
+const PROXY_ENV_KEYS = [
+	"HTTPS_PROXY",
+	"https_proxy",
+	"HTTP_PROXY",
+	"http_proxy",
+	"ALL_PROXY",
+	"all_proxy",
+	"NO_PROXY",
+	"no_proxy",
+	"NODE_EXTRA_CA_CERTS",
+] as const;
 
 function readOptions(
 	config: GatewayResolvedProviderConfig,
@@ -20,7 +33,9 @@ function readOptions(
 	return (config.options as Record<string, unknown> | undefined) ?? {};
 }
 
-function readDebugLogger(options: Record<string, unknown>): BasicLogger | undefined {
+function readDebugLogger(
+	options: Record<string, unknown>,
+): BasicLogger | undefined {
 	const logger = options[CLINE_DEBUG_LOGGER_OPTION];
 	if (
 		typeof logger === "object" &&
@@ -88,6 +103,36 @@ function resolveClaudeExecutable(): string | undefined {
 		}
 	}
 	return findExecutableOnPath("claude");
+}
+
+function logSapDebug(logger: BasicLogger | undefined, message: string): void {
+	if (logger) {
+		logger.log(message);
+	} else {
+		console.log(message);
+	}
+}
+
+function redactProxyEnvValue(value: string): string {
+	try {
+		const parsed = new URL(value);
+		if (parsed.username) {
+			parsed.username = "***";
+		}
+		if (parsed.password) {
+			parsed.password = "***";
+		}
+		return parsed.toString();
+	} catch {
+		return value.replace(/\/\/([^/@:]+):([^/@]+)@/, "//***:***@");
+	}
+}
+
+function summarizeProxyEnv(): string {
+	return PROXY_ENV_KEYS.map((key) => {
+		const value = process.env[key];
+		return `${key}=${value ? redactProxyEnvValue(value) : "<unset>"}`;
+	}).join(", ");
 }
 
 export async function createClaudeCodeProviderModule(
@@ -226,8 +271,6 @@ function readStringOption(
 		: undefined;
 }
 
-
-
 function normalizeSapTokenUrl(tokenUrl: string): string {
 	let normalized = tokenUrl;
 	while (normalized.endsWith("/")) {
@@ -239,8 +282,6 @@ function normalizeSapTokenUrl(tokenUrl: string): string {
 function normalizeSapTokenBaseUrl(tokenUrl: string): string {
 	return normalizeSapTokenUrl(tokenUrl).replace(/\/oauth\/token$/i, "");
 }
-
-
 
 function hasExplicitSapConnectionConfig(
 	config: GatewayResolvedProviderConfig,
@@ -255,10 +296,17 @@ function hasExplicitSapConnectionConfig(
 	);
 }
 
+type SapServiceBinding = {
+	clientId: string;
+	clientSecret: string;
+	tokenBaseUrl: string;
+	aiApiUrl: string;
+};
+
 function buildSapServiceBinding(
 	config: GatewayResolvedProviderConfig,
 	options: Record<string, unknown>,
-): { clientId: string; clientSecret: string; tokenBaseUrl: string; aiApiUrl: string } | undefined {
+): SapServiceBinding | undefined {
 	const clientId = readStringOption(options, "clientId");
 	const clientSecret =
 		readStringOption(options, "clientSecret") ?? config.apiKey?.trim();
@@ -299,31 +347,43 @@ async function buildSapDestination(
 
 	const logger = readDebugLogger(options);
 	const probeMsg = `[sap-ai] fetching OAuth token via xssec for ${config.providerId} from ${creds.tokenBaseUrl}`;
-	if (logger) {
-		logger.log(probeMsg);
-	} else {
-		console.log(probeMsg);
-	}
+	logSapDebug(logger, probeMsg);
+	logSapDebug(
+		logger,
+		`[sap-ai] proxy env for xssec token fetch: ${summarizeProxyEnv()}`,
+	);
 
-	// Fetch the token through xssec's XsuaaService, forwarding the
-	// host-configured fetch (Electron-routed in VS Code, undici ProxyAgent in
-	// standalone) as fetchFunction so xssec uses the same network stack as all
-	// other Cline requests instead of its bare node:https.request default.
-	// const fetchFn =
-	// 	(config.fetch as typeof globalThis.fetch | undefined) ?? globalThis.fetch;
+	const currentCerts = tls.getCACertificates("default");
+	const systemCerts = tls.getCACertificates("system");
+	const ca = [...currentCerts, ...systemCerts];
+	const requests = {
+		ca,
+		timeout: 10000,
+	} as unknown as NonNullable<ConstructorParameters<typeof XsuaaService>[1]>["requests"];
+
+	// Fetch the token through xssec's XsuaaService while keeping xssec on its
+	// Node http/https.request path. The local xssec fork uses proxyEnv-aware
+	// agents by default; passing CA material here keeps TLS trust scoped to this
+	// service instead of mutating global Node TLS state. xssec's generated
+	// ServiceConfig type currently omits requests.ca even though the runtime
+	// JSDoc/source accepts it.
 	const xsuaaService = new XsuaaService(
 		{
 			clientid: creds.clientId,
 			clientsecret: creds.clientSecret,
 			url: creds.tokenBaseUrl,
 		},
-		{ fetchFunction: globalThis.fetch },
+		{
+			requests,
+		},
 	);
 	const tokenResponse = await xsuaaService.fetchClientCredentialsToken();
 	const token = tokenResponse.access_token;
 
 	if (logger) {
-		logger.log(`[sap-ai] OAuth token obtained via xssec for ${config.providerId}, url=${creds.aiApiUrl}`);
+		logger.log(
+			`[sap-ai] OAuth token obtained via xssec for ${config.providerId}, url=${creds.aiApiUrl}`,
+		);
 	}
 
 	// Return a fully-resolved HttpDestination with authTokens pre-populated.
